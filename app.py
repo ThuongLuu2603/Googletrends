@@ -57,7 +57,17 @@ st.sidebar.title("🔍 Bộ lọc")
 st.sidebar.markdown("---")
 
 # Chọn từ khóa
-popular_keywords = get_popular_keywords()
+@st.cache_data(ttl=60*60*6)
+def cached_popular_keywords():
+    return get_popular_keywords()
+
+try:
+    popular_keywords = cached_popular_keywords()
+except Exception as e:
+    st.sidebar.error(f"Không thể lấy danh sách từ khóa từ Google Trends: {e}")
+    # provide minimal default so UI remains usable; user can still nhập từ khóa tùy chỉnh
+    popular_keywords = ['du lịch']
+
 keyword = st.sidebar.selectbox(
     "Chọn từ khóa du lịch:",
     options=popular_keywords,
@@ -98,16 +108,25 @@ else:  # Tùy chỉnh
     end_date = datetime.combine(end_date, datetime.min.time())
 
 st.sidebar.markdown("---")
+# Refresh control to clear cached pytrends results when needed
+if st.sidebar.button("Refresh data (clear cache)"):
+    st.cache_data.clear()
+    st.experimental_rerun()
+
 st.sidebar.info(f"**Từ khóa đang phân tích:** {keyword}")
 st.sidebar.info(f"**Thời gian:** {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}")
 
 # Tạo dữ liệu mô phỏng
-@st.cache_data
+@st.cache_data(ttl=60*60*6)
 def load_data(keyword, start_date, end_date):
-    """Load và cache dữ liệu"""
+    """Load và cache dữ liệu từ Google Trends (ttl 6h)."""
     return generate_trend_data(keyword, start_date, end_date)
 
-trend_data = load_data(keyword, start_date, end_date)
+try:
+    trend_data = load_data(keyword, start_date, end_date)
+except Exception as e:
+    st.error(f"Không thể lấy dữ liệu thực từ Google Trends: {e}")
+    st.stop()
 
 # Phần 1: Tổng quan
 st.markdown('<p class="sub-header">📊 Tổng quan</p>', unsafe_allow_html=True)
@@ -261,7 +280,16 @@ st.markdown("---")
 # Phần 4: Từ khóa Liên quan
 st.markdown('<p class="sub-header">🔗 Từ khóa Liên quan</p>', unsafe_allow_html=True)
 
-related_keywords_df = generate_related_keywords(keyword)
+@st.cache_data(ttl=60*60*6)
+def load_related(keyword):
+    return generate_related_keywords(keyword)
+
+try:
+    related_keywords_df = load_related(keyword)
+except Exception as e:
+    st.error(f"Không thể lấy từ khóa liên quan từ Google Trends: {e}")
+    # Provide empty DataFrame to avoid further exceptions in UI
+    related_keywords_df = pd.DataFrame(columns=['keyword', 'score'])
 
 col1, col2 = st.columns([2, 1])
 

@@ -92,7 +92,11 @@ streamlit run app.py
 ## Câu hỏi Thường gặp (FAQ)
 
 **Q: Dữ liệu có thực không?**
-A: Đây là dữ liệu mô phỏng. Để sử dụng dữ liệu thực, cần tích hợp API Google Trends (pytrends).
+A: Ứng dụng này sử dụng dữ liệu thực từ Google Trends qua `pytrends` (nếu môi trường được cấu hình và có kết nối).
+   LƯU Ý: Google có thể rate-limit (HTTP 429) nếu nhiều request cùng lúc hoặc IP bị chặn. Nếu gặp lỗi 429, hãy thử một trong các cách sau:
+   - Chạy ứng dụng trên máy cá nhân (IP mới) thay vì môi trường CI/container.
+   - Sử dụng proxy: đặt biến môi trường `GOOGLE_TRENDS_PROXY` với giá trị là một URL proxy (ví dụ `http://user:pass@host:port`) hoặc một JSON object map cho `http`/`https` (ví dụ `{"http": "http://...", "https": "http://..."}`).
+   - Giảm tốc độ gọi (thêm delays) hoặc phân tán yêu cầu.
 
 **Q: Làm sao thêm từ khóa mới?**
 A: Chỉnh sửa hàm `get_popular_keywords()` trong file `data_simulation.py`.

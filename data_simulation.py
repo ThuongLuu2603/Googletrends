@@ -1,9 +1,109 @@
 """
-Module mô phỏng dữ liệu Google Trends cho phân tích du lịch Việt Nam
+Module lấy dữ liệu Google Trends thực cho phân tích du lịch Việt Nam.
+
+LƯU Ý: theo yêu cầu, module này KHÔNG cung cấp dữ liệu mô phỏng. Nếu `pytrends`
+không được cài hoặc Google Trends không trả dữ liệu, các hàm sẽ raise lỗi rõ ràng.
 """
-import pandas as pd
-import numpy as np
+import logging
 from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import time
+import os
+import json
+
+try:
+    from pytrends.request import TrendReq
+    _PYTRENDS_AVAILABLE = True
+except Exception:
+    TrendReq = None
+    _PYTRENDS_AVAILABLE = False
+
+if _PYTRENDS_AVAILABLE:
+    try:
+        from pytrends.exceptions import TooManyRequestsError
+    except Exception:
+        TooManyRequestsError = Exception
+else:
+    TooManyRequestsError = Exception
+
+logger = logging.getLogger(__name__)
+
+# retry config for pytrends requests
+_MAX_RETRIES = 5
+_RETRY_BACKOFF = 2  # seconds (exponential backoff base)
+
+def _retry_call(fn, *args, max_retries=_MAX_RETRIES, backoff=_RETRY_BACKOFF, **kwargs):
+    """Call fn(*args, **kwargs) with retries on TooManyRequestsError or transient errors.
+    Raises last exception if all retries fail.
+    """
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            # If it's clearly a 4xx/5xx transient error, retry; otherwise raise immediately.
+            if isinstance(e, TooManyRequestsError) or '429' in str(e) or attempt < max_retries:
+                sleep_time = backoff ** (attempt - 1)
+                logger.warning('Transient error on attempt %s/%s: %s — retrying after %ss', attempt, max_retries, e, sleep_time)
+                time.sleep(sleep_time)
+                continue
+            raise
+    # exhausted
+    raise last_exc
+
+
+def _get_pytrends():
+    """Create a TrendReq instance. If environment variable GOOGLE_TRENDS_PROXY is set,
+    it will be used as proxies for requests (either a single URL string or a JSON map).
+    """
+    if not _PYTRENDS_AVAILABLE:
+        raise RuntimeError("pytrends package is required. Please install pytrends and ensure network/proxy setup.")
+
+    requests_args = {}
+    proxy_env = os.environ.get('GOOGLE_TRENDS_PROXY')
+    if proxy_env:
+        try:
+            proxies = json.loads(proxy_env)
+        except Exception:
+            proxies = {'http': proxy_env, 'https': proxy_env}
+        requests_args['proxies'] = proxies
+
+    # allow passing requests_args into TrendReq to enable proxies/timeouts
+    return TrendReq(hl='vi-VN', tz=7, requests_args=requests_args)
+
+# Mapping đơn giản từ tên tỉnh/thành phổ biến sang 3 vùng lớn: Bắc/Trung/Nam
+# Đây là một ánh xạ heuristic để gom các kết quả theo khu vực macro. Nếu tên tỉnh
+# không khớp, mặc định sẽ gán vào 'Bắc'.
+_PROVINCE_TO_REGION = {
+    # Bắc
+    'hà nội': 'Bắc', 'hanoi': 'Bắc', 'bắc ninh': 'Bắc', 'bắc giang': 'Bắc', 'hải phòng': 'Bắc',
+    'thái bình': 'Bắc', 'nam định': 'Bắc', 'ninh bình': 'Bắc', 'vĩnh phúc': 'Bắc', 'hưng yên': 'Bắc',
+    # Trung
+    'đà nẵng': 'Trung', 'da nang': 'Trung', 'thanh hóa': 'Trung', 'nghệ an': 'Trung', 'hà tĩnh': 'Trung',
+    'quảng bình': 'Trung', 'quảng trị': 'Trung', 'thừa thiên': 'Trung', 'huế': 'Trung', 'quảng nam': 'Trung',
+    'quảng ngãi': 'Trung', 'khánh hòa': 'Trung', 'nha trang': 'Trung',
+    # Nam
+    'hồ chí minh': 'Nam', 'ho chi minh': 'Nam', 'sài gòn': 'Nam', 'saigon': 'Nam', 'bình dương': 'Nam',
+    'đồng nai': 'Nam', 'bà rịa': 'Nam', 'vũng tàu': 'Nam', 'kiên giang': 'Nam', 'phú quốc': 'Nam',
+    'ninh thuận': 'Nam', 'bình thuận': 'Nam', 'lâm đồng': 'Nam', 'đắk lắk': 'Nam', 'gia lai': 'Nam'
+}
+
+def _map_province_to_region(name: str) -> str:
+    if not isinstance(name, str):
+        return 'Bắc'
+    lname = name.lower()
+    for key, region in _PROVINCE_TO_REGION.items():
+        if key in lname:
+            return region
+    # fallback heuristic: look for keywords
+    if any(k in lname for k in ('hồ', 'ho chi', 'sài', 'saigon', 'hcm')):
+        return 'Nam'
+    if any(k in lname for k in ('đà', 'da nang', 'đà nẵng', 'huế', 'quảng')):
+        return 'Trung'
+    return 'Bắc'
 
 
 def generate_trend_data(keyword, start_date, end_date, regions=None):
@@ -21,42 +121,77 @@ def generate_trend_data(keyword, start_date, end_date, regions=None):
     """
     if regions is None:
         regions = ['Bắc', 'Trung', 'Nam']
-    
-    # Tạo dãy ngày
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    
-    data = []
-    for region in regions:
-        # Tạo xu hướng cơ bản với seasonal pattern
-        base_trend = 50
-        for date in date_range:
-            # Thêm seasonal effect (du lịch cao vào hè và lễ tết)
-            seasonal = 20 * np.sin(2 * np.pi * date.dayofyear / 365)
-            
-            # Thêm weekend effect
-            weekend_boost = 10 if date.dayofweek >= 5 else 0
-            
-            # Thêm regional multiplier
-            if region == 'Nam':
-                regional_mult = 1.2  # Nam có xu hướng tìm kiếm cao hơn
-            elif region == 'Trung':
-                regional_mult = 0.9
-            else:  # Bắc
-                regional_mult = 1.0
-            
-            # Tạo giá trị cuối cùng với noise
-            noise = np.random.normal(0, 5)
-            value = max(0, min(100, (base_trend + seasonal + weekend_boost) * regional_mult + noise))
-            
-            data.append({
-                'date': date,
-                'keyword': keyword,
-                'region': region,
-                'value': round(value, 2)
-            })
-    
-    df = pd.DataFrame(data)
-    return df
+
+    if not _PYTRENDS_AVAILABLE:
+        raise RuntimeError("pytrends package is required for real data. Please install with `pip install pytrends` and ensure network access to Google Trends.")
+
+    # Normalize inputs
+    if not isinstance(start_date, datetime):
+        start_date = pd.to_datetime(start_date)
+    if not isinstance(end_date, datetime):
+        end_date = pd.to_datetime(end_date)
+
+    pytrends = _get_pytrends()
+    timeframe = f"{start_date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}"
+
+    try:
+        pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='VN', gprop='')
+    except Exception as e:
+        logger.error('Failed to build pytrends payload: %s', e)
+        raise RuntimeError(f'pytrends build_payload failed: {e}')
+
+    try:
+        national = _retry_call(pytrends.interest_over_time)
+    except Exception as e:
+        logger.error('Failed to fetch interest_over_time: %s', e)
+        raise RuntimeError(f'Failed to fetch time series from Google Trends: {e}')
+
+    if national is None or national.empty:
+        raise RuntimeError('Google Trends returned empty time series for the requested timeframe')
+
+    try:
+        by_region = _retry_call(pytrends.interest_by_region, resolution='REGION', inc_low_vol=True, inc_geo_code=False)
+    except Exception as e:
+        logger.error('Failed to fetch interest_by_region: %s', e)
+        raise RuntimeError(f'Failed to fetch regional breakdown from Google Trends: {e}')
+
+    if by_region is None or by_region.empty:
+        raise RuntimeError('Google Trends returned empty regional data for the requested timeframe')
+
+    if keyword in by_region.columns:
+        region_vals = by_region[keyword].copy()
+    else:
+        region_vals = by_region.iloc[:, 0].copy()
+
+    mapped = {}
+    for prov, val in region_vals.items():
+        macro = _map_province_to_region(str(prov))
+        mapped.setdefault(macro, []).append(float(val))
+
+    macro_means = {k: (sum(v) / len(v) if v else 0.0) for k, v in mapped.items()}
+    for r in regions:
+        macro_means.setdefault(r, 0.0)
+
+    total = sum(macro_means.values())
+    if total <= 0:
+        raise RuntimeError('Regional totals are zero - cannot compute shares')
+
+    macro_share = {k: (v / total) for k, v in macro_means.items()}
+
+    if keyword in national.columns:
+        series = national[keyword]
+    else:
+        series = national.iloc[:, 0]
+
+    rows = []
+    for dt, nat_val in series.items():
+        date = pd.to_datetime(dt)
+        for r in regions:
+            val = float(nat_val) * float(macro_share.get(r, 0.0))
+            val = max(0.0, min(100.0, val))
+            rows.append({'date': date, 'keyword': keyword, 'region': r, 'value': round(val, 2)})
+
+    return pd.DataFrame(rows)
 
 
 def generate_regional_comparison(keyword, date):
@@ -71,24 +206,38 @@ def generate_regional_comparison(keyword, date):
         pd.DataFrame: DataFrame chứa dữ liệu so sánh khu vực
     """
     regions = ['Bắc', 'Trung', 'Nam']
-    
-    # Tạo giá trị mô phỏng cho từng khu vực
-    base_values = {
-        'Bắc': np.random.uniform(60, 80),
-        'Trung': np.random.uniform(50, 70),
-        'Nam': np.random.uniform(70, 90)
-    }
-    
-    data = []
-    for region in regions:
-        data.append({
-            'region': region,
-            'keyword': keyword,
-            'value': round(base_values[region], 2)
-        })
-    
-    df = pd.DataFrame(data)
-    return df
+
+    if not _PYTRENDS_AVAILABLE:
+        raise RuntimeError("pytrends package is required for real regional comparison. Please install pytrends and ensure network access to Google Trends.")
+
+    if not isinstance(date, datetime):
+        date = pd.to_datetime(date)
+
+    pytrends = _get_pytrends()
+    timeframe = f"{date.strftime('%Y-%m-%d')} {date.strftime('%Y-%m-%d')}"
+    try:
+        pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='VN', gprop='')
+        by_region = _retry_call(pytrends.interest_by_region, resolution='REGION', inc_low_vol=True, inc_geo_code=False)
+    except Exception as e:
+        logger.error('Failed to fetch regional comparison: %s', e)
+        raise RuntimeError(f'Failed to fetch regional comparison from Google Trends: {e}')
+
+    if by_region is None or by_region.empty:
+        raise RuntimeError('Google Trends returned empty regional data for the requested date')
+
+    if keyword in by_region.columns:
+        col = by_region[keyword]
+    else:
+        col = by_region.iloc[:, 0]
+
+    mapped = {}
+    for prov, val in col.items():
+        macro = _map_province_to_region(str(prov))
+        mapped.setdefault(macro, []).append(float(val))
+
+    base_values = {r: (sum(mapped.get(r, [])) / max(1, len(mapped.get(r, [])))) for r in regions}
+    data = [{'region': r, 'keyword': keyword, 'value': round(base_values.get(r, 0.0), 2)} for r in regions]
+    return pd.DataFrame(data)
 
 
 def generate_related_keywords(main_keyword):
@@ -101,102 +250,27 @@ def generate_related_keywords(main_keyword):
     Returns:
         pd.DataFrame: DataFrame chứa từ khóa liên quan và điểm số
     """
-    # Danh sách từ khóa du lịch phổ biến tại Việt Nam
-    related_keywords_map = {
-        'du lịch': [
-            ('du lịch hè', 95),
-            ('tour du lịch', 88),
-            ('du lịch biển', 85),
-            ('du lịch miền Trung', 78),
-            ('vé máy bay', 75),
-            ('khách sạn', 72),
-            ('resort', 68),
-            ('du lịch Đà Nẵng', 65),
-            ('du lịch Phú Quốc', 62),
-            ('du lịch Nha Trang', 60)
-        ],
-        'Đà Nẵng': [
-            ('Bà Nà Hills', 92),
-            ('Hội An', 88),
-            ('Mỹ Khê', 85),
-            ('Sơn Trà', 78),
-            ('Ngũ Hành Sơn', 75),
-            ('cầu Rồng', 72),
-            ('bãi biển Đà Nẵng', 70),
-            ('khách sạn Đà Nẵng', 68),
-            ('tour Đà Nẵng', 65),
-            ('vé máy bay Đà Nẵng', 60)
-        ],
-        'Phú Quốc': [
-            ('Vinpearl Phú Quốc', 90),
-            ('bãi Sao', 85),
-            ('Sunset Sanato', 80),
-            ('chợ đêm Phú Quốc', 75),
-            ('Grand World', 72),
-            ('cáp treo Hòn Thơm', 70),
-            ('Safari Phú Quốc', 68),
-            ('resort Phú Quốc', 65),
-            ('tour Phú Quốc', 62),
-            ('vé máy bay Phú Quốc', 58)
-        ],
-        'Nha Trang': [
-            ('Vinpearl Nha Trang', 88),
-            ('biển Nha Trang', 85),
-            ('bùn khoáng Nha Trang', 80),
-            ('Hòn Mun', 75),
-            ('VinWonders Nha Trang', 72),
-            ('khách sạn Nha Trang', 70),
-            ('tour Nha Trang', 68),
-            ('Tháp Bà', 65),
-            ('Hòn Tằm', 60),
-            ('vé máy bay Nha Trang', 55)
-        ],
-        'Hà Nội': [
-            ('phố cổ Hà Nội', 90),
-            ('Hồ Gươm', 85),
-            ('chùa Một Cột', 78),
-            ('Văn Miếu', 75),
-            ('Lăng Bác', 72),
-            ('bảo tàng Hà Nội', 68),
-            ('ẩm thực Hà Nội', 80),
-            ('khách sạn Hà Nội', 65),
-            ('tour Hà Nội', 62),
-            ('vé máy bay Hà Nội', 58)
-        ],
-        'Sài Gòn': [
-            ('Nhà thờ Đức Bà', 88),
-            ('Bưu điện Sài Gòn', 85),
-            ('Bến Thành', 82),
-            ('Bitexco', 78),
-            ('Phố đi bộ Nguyễn Huệ', 75),
-            ('Địa đạo Củ Chi', 72),
-            ('khách sạn Sài Gòn', 70),
-            ('ẩm thực Sài Gòn', 85),
-            ('tour Sài Gòn', 65),
-            ('vé máy bay Sài Gòn', 60)
-        ]
-    }
-    
-    # Tìm từ khóa liên quan
-    related = None
-    for key in related_keywords_map:
-        if key.lower() in main_keyword.lower():
-            related = related_keywords_map[key]
-            break
-    
-    # Nếu không tìm thấy, sử dụng danh sách mặc định
-    if related is None:
-        related = related_keywords_map['du lịch']
-    
-    data = []
-    for keyword, score in related:
-        data.append({
-            'keyword': keyword,
-            'score': score
-        })
-    
-    df = pd.DataFrame(data)
-    return df
+    if not _PYTRENDS_AVAILABLE:
+        raise RuntimeError('pytrends package is required to fetch related keywords. Please install pytrends and ensure network access to Google Trends.')
+
+    pytrends = _get_pytrends()
+    try:
+        pytrends.build_payload([main_keyword], timeframe='today 12-m', geo='VN')
+        related = _retry_call(pytrends.related_queries)
+    except Exception as e:
+        logger.error('Failed to fetch related queries: %s', e)
+        raise RuntimeError(f'Failed to fetch related queries from Google Trends: {e}')
+
+    if not related or main_keyword not in related or related[main_keyword]['top'] is None:
+        raise RuntimeError('Google Trends did not return related queries for the given keyword')
+
+    top_df = related[main_keyword]['top'].copy().head(10)
+    rows = []
+    for _, r in top_df.iterrows():
+        q = r.get('query') or r.get('keyword')
+        score = int(r.get('value', 0))
+        rows.append({'keyword': q, 'score': score})
+    return pd.DataFrame(rows)
 
 
 def get_popular_keywords():
@@ -206,15 +280,17 @@ def get_popular_keywords():
     Returns:
         list: Danh sách từ khóa phổ biến
     """
-    return [
-        'du lịch',
-        'Đà Nẵng',
-        'Phú Quốc',
-        'Nha Trang',
-        'Hà Nội',
-        'Sài Gòn',
-        'Hạ Long',
-        'Đà Lạt',
-        'Hội An',
-        'Vũng Tàu'
-    ]
+    if not _PYTRENDS_AVAILABLE:
+        raise RuntimeError('pytrends package is required to fetch popular keywords. Please install pytrends and ensure network access to Google Trends.')
+
+    pytrends = _get_pytrends()
+    try:
+        trends = _retry_call(pytrends.trending_searches, pn='vietnam')
+    except Exception as e:
+        logger.error('Failed to fetch trending searches: %s', e)
+        raise RuntimeError(f'Failed to fetch trending searches from Google Trends: {e}')
+
+    if trends is None or trends.empty:
+        raise RuntimeError('Google Trends returned no trending searches for Vietnam')
+
+    return trends[0].astype(str).head(20).tolist()
