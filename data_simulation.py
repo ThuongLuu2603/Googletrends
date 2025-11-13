@@ -278,19 +278,27 @@ def get_popular_keywords():
     Lấy danh sách các từ khóa phổ biến cho du lịch Việt Nam
     
     Returns:
-        list: Danh sách từ khóa phổ biến
+        list: Danh sách từ khóa phổ biến về du lịch
     """
+    # Danh sách từ khóa du lịch phổ biến tại Việt Nam (fallback)
+    default_keywords = [
+        'du lịch', 'Đà Nẵng', 'Phú Quốc', 'Nha Trang', 'Hà Nội',
+        'Sapa', 'Hội An', 'Vịnh Hạ Long', 'Đà Lạt', 'Huế',
+        'Vũng Tàu', 'Quy Nhơn', 'Mũi Né', 'Côn Đảo', 'Cần Thơ',
+        'tour du lịch', 'khách sạn', 'vé máy bay', 'resort', 'homestay'
+    ]
+    
     if not _PYTRENDS_AVAILABLE:
-        raise RuntimeError('pytrends package is required to fetch popular keywords. Please install pytrends and ensure network access to Google Trends.')
+        logger.warning('pytrends not available, returning default travel keywords')
+        return default_keywords
 
     pytrends = _get_pytrends()
     try:
         trends = _retry_call(pytrends.trending_searches, pn='vietnam')
+        if trends is not None and not trends.empty:
+            return trends[0].astype(str).head(20).tolist()
     except Exception as e:
-        logger.error('Failed to fetch trending searches: %s', e)
-        raise RuntimeError(f'Failed to fetch trending searches from Google Trends: {e}')
-
-    if trends is None or trends.empty:
-        raise RuntimeError('Google Trends returned no trending searches for Vietnam')
-
-    return trends[0].astype(str).head(20).tolist()
+        logger.warning('Failed to fetch trending searches (error: %s), using default travel keywords', e)
+    
+    # Fallback to default travel keywords
+    return default_keywords
