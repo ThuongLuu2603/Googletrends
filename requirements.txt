@@ -1,0 +1,8 @@
+streamlit==1.28.0
+# Use looser pins so Streamlit Cloud (Python 3.13) can resolve wheels
+pandas>=2.0.3
+plotly>=5.17.0
+# numpy >=1.26 provides prebuilt wheels for Python 3.13
+numpy>=1.26.4
+# pytrends latest compatible release
+pytrends>=4.9.2
