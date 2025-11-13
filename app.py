@@ -56,17 +56,30 @@ st.markdown("---")
 st.sidebar.title("🔍 Bộ lọc")
 st.sidebar.markdown("---")
 
+# Nút làm mới cache
+if st.sidebar.button("🔄 Làm mới dữ liệu (xóa cache)", help="Xóa cache và tải dữ liệu mới từ Google Trends"):
+    st.cache_data.clear()
+    st.sidebar.success("✅ Đã xóa cache!")
+    st.rerun()
+
+st.sidebar.markdown("---")
+
 # Chọn từ khóa
-@st.cache_data(ttl=60*60*6)
+@st.cache_data(ttl=60*60*6)  # Cache 6 giờ
 def cached_popular_keywords():
     return get_popular_keywords()
 
 try:
     popular_keywords = cached_popular_keywords()
 except Exception as e:
-    st.sidebar.error(f"Không thể lấy danh sách từ khóa từ Google Trends: {e}")
-    # provide minimal default so UI remains usable; user can still nhập từ khóa tùy chỉnh
-    popular_keywords = ['du lịch']
+    error_msg = str(e)
+    if '429' in error_msg or 'rate limit' in error_msg.lower():
+        st.sidebar.warning("⚠️ Google Trends đang rate-limit. Sử dụng danh sách từ khóa mặc định.")
+        st.sidebar.info("💡 **Mẹo xử lý rate limit:**\n- Chờ 2-5 phút\n- Dùng cache (tránh click nút làm mới)\n- Requests được tự động retry với thời gian chờ tăng dần")
+    else:
+        st.sidebar.error(f"Lỗi lấy từ khóa: {error_msg}")
+    # provide minimal default so UI remains usable
+    popular_keywords = ['du lịch', 'Đà Nẵng', 'Phú Quốc', 'Nha Trang', 'Hà Nội', 'Sapa']
 
 keyword = st.sidebar.selectbox(
     "Chọn từ khóa du lịch:",
@@ -125,7 +138,22 @@ def load_data(keyword, start_date, end_date):
 try:
     trend_data = load_data(keyword, start_date, end_date)
 except Exception as e:
-    st.error(f"Không thể lấy dữ liệu thực từ Google Trends: {e}")
+    error_msg = str(e)
+    if '429' in error_msg or 'rate limit' in error_msg.lower():
+        st.error("🚫 **Google Trends đang giới hạn tốc độ (Rate Limit 429)**")
+        st.warning("""
+        **Nguyên nhân:** Streamlit Cloud chia sẻ IP với nhiều ứng dụng, dẫn đến quá nhiều requests tới Google Trends.
+        
+        **Giải pháp:**
+        1. ⏰ **Chờ 5-10 phút** rồi thử lại
+        2. 💾 **Sử dụng cache:** Tránh click nút "Làm mới dữ liệu" liên tục
+        3. 🔄 **Requests tự động retry** với thời gian chờ: 5s → 25s → 125s
+        4. 🌐 **Nâng cao:** Cấu hình proxy riêng qua biến môi trường `GOOGLE_TRENDS_PROXY` trong Streamlit Cloud secrets
+        
+        **Lưu ý:** Dữ liệu được cache 6 giờ, không cần làm mới liên tục.
+        """)
+    else:
+        st.error(f"❌ **Không thể lấy dữ liệu từ Google Trends**\n\n{error_msg}")
     st.stop()
 
 # Phần 1: Tổng quan

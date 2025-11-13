@@ -31,8 +31,8 @@ else:
 logger = logging.getLogger(__name__)
 
 # retry config for pytrends requests
-_MAX_RETRIES = 5
-_RETRY_BACKOFF = 2  # seconds (exponential backoff base)
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 5  # seconds (exponential backoff base - increased for rate limits)
 
 def _retry_call(fn, *args, max_retries=_MAX_RETRIES, backoff=_RETRY_BACKOFF, **kwargs):
     """Call fn(*args, **kwargs) with retries on TooManyRequestsError or transient errors.
@@ -44,14 +44,30 @@ def _retry_call(fn, *args, max_retries=_MAX_RETRIES, backoff=_RETRY_BACKOFF, **k
             return fn(*args, **kwargs)
         except Exception as e:
             last_exc = e
-            # If it's clearly a 4xx/5xx transient error, retry; otherwise raise immediately.
-            if isinstance(e, TooManyRequestsError) or '429' in str(e) or attempt < max_retries:
-                sleep_time = backoff ** (attempt - 1)
-                logger.warning('Transient error on attempt %s/%s: %s — retrying after %ss', attempt, max_retries, e, sleep_time)
+            # Check if it's a rate-limit error (429)
+            is_rate_limit = isinstance(e, TooManyRequestsError) or '429' in str(e)
+            
+            if is_rate_limit or attempt < max_retries:
+                sleep_time = backoff ** attempt  # Exponential: 5, 25, 125 seconds
+                if is_rate_limit:
+                    logger.warning('Rate limit hit (429) on attempt %s/%s — waiting %ss before retry', 
+                                 attempt, max_retries, sleep_time)
+                else:
+                    logger.warning('Transient error on attempt %s/%s: %s — retrying after %ss', 
+                                 attempt, max_retries, e, sleep_time)
                 time.sleep(sleep_time)
                 continue
             raise
-    # exhausted
+    # exhausted - add helpful message for 429
+    if isinstance(last_exc, TooManyRequestsError) or (last_exc and '429' in str(last_exc)):
+        raise RuntimeError(
+            'Google Trends rate limit exceeded (429). '
+            'Streamlit Cloud shares IPs, causing rate limits. '
+            'Giải pháp: '
+            '(1) Chờ vài phút rồi thử lại, '
+            '(2) Sử dụng cache (nút "Làm mới dữ liệu" ở sidebar), '
+            '(3) Hoặc cấu hình proxy riêng qua biến môi trường GOOGLE_TRENDS_PROXY.'
+        ) from last_exc
     raise last_exc
 
 
